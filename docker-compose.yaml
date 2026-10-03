@@ -1,0 +1,34 @@
+services:
+  renew:
+    build: ./app
+    image: katabump-renew:local
+    init: true
+    restart: unless-stopped
+    environment:
+      TZ: "Asia/Shanghai"
+      # 续期固定在北京时间每天 10:00；首次无记录时先登录获取 Expiry。
+      # 相邻账号之间随机等待 5～10 分钟；单位为秒，最大允许 3600。
+      ACCOUNT_DELAY_MIN_SECONDS: "300"
+      ACCOUNT_DELAY_MAX_SECONDS: "600"
+      # 可选浏览器代理，例如 http://username:password@proxy.example.com:8080
+      HTTP_PROXY: ""
+      # 同时填写后发送 Telegram 结果和截图；留空则不发送。
+      TG_BOT_TOKEN: ""
+      TG_CHAT_ID: ""
+    shm_size: 256mb
+    stop_grace_period: 30s
+    volumes:
+      - type: bind
+        source: ./login.json
+        target: /app/login.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - renew-data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+volumes:
+  renew-data:

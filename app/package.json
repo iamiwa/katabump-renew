@@ -1,0 +1,13 @@
+{
+  "name": "katabump-docker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Katabump renewal for Docker on Oracle Cloud",
+  "engines": { "node": ">=22" },
+  "scripts": { "start": "node index.js", "test": "node --test --test-concurrency=1 test/*.test.js" },
+  "dependencies": {
+    "playwright": "1.63.0",
+    "playwright-extra": "4.3.6",
+    "puppeteer-extra-plugin-stealth": "2.11.2"
+  }
+}
