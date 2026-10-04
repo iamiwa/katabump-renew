@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { setTimeout: delay } = require('node:timers/promises');
-const { INJECTED_SCRIPT, attemptTurnstileCdp, verifyAltcha } = require('./challenge');
+const { INJECTED_SCRIPT, clickTurnstileCheckbox, verifyAltcha } = require('./challenge');
 
 const BASE = 'https://dashboard.katabump.com';
 const ROOT = __dirname;
@@ -120,11 +120,12 @@ async function launch(config) {
 }
 async function verify(page, required = false, scope = page) {
   if (!required && !await scope.locator('iframe[src*="challenges.cloudflare.com"], [name="cf-turnstile-response"]').count()) return true;
-  let clicked = false;
+  const solved = () => scope.locator('[name="cf-turnstile-response"]').evaluateAll(inputs => inputs.some(input => input.value?.trim()));
+  // 组件可能忽略初始化期间到达的点击，或点击后仍需等待计算；没有 token 就重新取坐标再点，
+  // 每 5 秒一次、共 20 秒。已勾选或控件消失时只等待结果，不重复点击。
   for (let i = 0; i < 20; i++) {
-    const complete = await scope.locator('[name="cf-turnstile-response"]').evaluateAll(inputs => inputs.some(input => input.value?.trim()));
-    if (complete) return true;
-    if (!clicked) clicked = await attemptTurnstileCdp(page);
+    if (await solved()) return true;
+    if (i % 5 === 0) await clickTurnstileCheckbox(page);
     await page.waitForTimeout(1000);
   }
   return false;

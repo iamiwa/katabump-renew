@@ -1,5 +1,8 @@
 'use strict';
-// 源自 ../katabump-main/action_renew.js；保留参考项目的页面验证交互。
+// Turnstile 交互：Hook attachShadow 记录 iframe 内的 shadow root，点击前按实时布局取坐标。
+// Turnstile 的 input[type=checkbox] 是覆盖整条标签（含文字）的透明控件，宽度随文字长度变化，
+// 其几何中心落在 "Verify you are human" 文字上；可见的方框位于该控件左端，边长等于控件高度，
+// 所以点击点取左端正方形中心，而不是控件中心。
 const INJECTED_SCRIPT = `
 (function() {
     if (window.self === window.top) return;
@@ -11,39 +14,20 @@ const INJECTED_SCRIPT = `
         }
         let screenX = getRandomInt(800, 1200);
         let screenY = getRandomInt(400, 600);
-        
+
         Object.defineProperty(MouseEvent.prototype, 'screenX', { value: screenX });
         Object.defineProperty(MouseEvent.prototype, 'screenY', { value: screenY });
     } catch (e) { }
 
-    // 2. 简单的 attachShadow Hook
+    // 2. 记录 shadow root；位置在点击时再读取，避免缓存渲染早期的过期坐标
     try {
         const originalAttachShadow = Element.prototype.attachShadow;
-        
+
         Element.prototype.attachShadow = function(init) {
             const shadowRoot = originalAttachShadow.call(this, init);
-            
-            if (shadowRoot) {
-                const checkAndReport = () => {
-                    const checkbox = shadowRoot.querySelector('input[type="checkbox"]');
-                    if (checkbox) {
-                        const rect = checkbox.getBoundingClientRect();
-                        if (rect.width > 0 && rect.height > 0 && window.innerWidth > 0 && window.innerHeight > 0) {
-                            const xRatio = (rect.left + rect.width / 2) / window.innerWidth;
-                            const yRatio = (rect.top + rect.height / 2) / window.innerHeight;
-                            window.__turnstile_data = { xRatio, yRatio };
-                            return true;
-                        }
-                    }
-                    return false;
-                };
 
-                if (!checkAndReport()) {
-                    const observer = new MutationObserver(() => {
-                        if (checkAndReport()) observer.disconnect();
-                    });
-                    observer.observe(shadowRoot, { childList: true, subtree: true });
-                }
+            if (shadowRoot) {
+                (window.__turnstile_roots = window.__turnstile_roots || []).push(shadowRoot);
             }
             return shadowRoot;
         };
@@ -53,55 +37,40 @@ const INJECTED_SCRIPT = `
 })();
 `;
 
-async function attemptTurnstileCdp(page) {
-    const frames = page.frames();
-    for (const frame of frames) {
-        try {
-            const data = await frame.evaluate(() => window.__turnstile_data).catch(() => null);
-
-            if (data) {
-                console.log('>> 在 frame 中发现 Turnstile。比例:', data);
-
-                const iframeElement = await frame.frameElement();
-                if (!iframeElement) continue;
-
-                const box = await iframeElement.boundingBox();
-                if (!box) continue;
-
-                const clickX = box.x + (box.width * data.xRatio);
-                const clickY = box.y + (box.height * data.yRatio);
-
-                console.log(`>> 计算点击坐标: (${clickX.toFixed(2)}, ${clickY.toFixed(2)})`);
-
-                const client = await page.context().newCDPSession(page);
-                try {
-                    await client.send('Input.dispatchMouseEvent', {
-                        type: 'mousePressed',
-                        x: clickX,
-                        y: clickY,
-                        button: 'left',
-                        clickCount: 1
-                    });
-
-                    await new Promise(r => setTimeout(r, 50 + Math.random() * 100));
-
-                    await client.send('Input.dispatchMouseEvent', {
-                        type: 'mouseReleased',
-                        x: clickX,
-                        y: clickY,
-                        button: 'left',
-                        clickCount: 1
-                    });
-
-                    console.log('>> CDP 点击已发送。');
-                    return true;
-                } finally {
-                    await client.detach().catch(() => {});
-                }
+// 在 Turnstile iframe 内实时读取复选框，返回可见方框中心的 iframe 坐标。
+async function checkboxPoint(frame) {
+    return frame.evaluate(() => {
+        for (const root of (window.__turnstile_roots || [])) {
+            for (const checkbox of root.querySelectorAll('input[type="checkbox"]')) {
+                const rect = checkbox.getBoundingClientRect();
+                if (rect.width <= 0 || rect.height <= 0) continue;
+                return { x: rect.left + rect.height / 2, y: rect.top + rect.height / 2, checked: checkbox.checked };
             }
-        } catch (e) { }
+        }
+        return null;
+    }).catch(() => null);
+}
+
+// 点击尚未勾选的 Turnstile 复选框；已勾选时返回 pending，交由调用方等待验证结果。
+async function clickTurnstileCheckbox(page) {
+    let seen = false;
+    for (const frame of page.frames()) {
+        const point = await checkboxPoint(frame);
+        if (!point) continue;
+        seen = true;
+        if (point.checked) continue;
+
+        const iframeElement = await frame.frameElement().catch(() => null);
+        const box = iframeElement && await iframeElement.boundingBox();
+        if (!box) continue;
+
+        const clickX = box.x + point.x;
+        const clickY = box.y + point.y;
+        console.log(`>> 点击 Turnstile 复选框: (${clickX.toFixed(2)}, ${clickY.toFixed(2)})`);
+        await page.mouse.click(clickX, clickY, { delay: 50 + Math.random() * 100 });
+        return 'clicked';
     }
-    return false;
+    return seen ? 'pending' : 'absent';
 }
 
 
@@ -127,4 +96,4 @@ async function verifyAltcha(modal) {
     return false;
 }
 
-module.exports = { INJECTED_SCRIPT, attemptTurnstileCdp, verifyAltcha };
+module.exports = { INJECTED_SCRIPT, clickTurnstileCheckbox, verifyAltcha };
